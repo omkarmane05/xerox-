@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A shop owner user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "shopId": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "owner"] }
+      },
+      "required": ["id", "name", "email", "shopId"]
+    },
+    "Shop": {
+      "title": "Shop",
+      "description": "A xerox shop",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "address": { "type": "string" },
+        "qrCodeUrl": { "type": "string" }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "PrintJob": {
+      "title": "PrintJob",
+      "description": "A document print request",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shopId": { "type": "string" },
+        "filename": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "fileType": { "type": "string" },
+        "numCopies": { "type": "number" },
+        "color": { "type": "string" },
+        "pagesPerSheet": { "type": "number" },
+        "pageRange": { "type": "string" },
+        "orientation": { "type": "string" },
+        "otp": { "type": "string" },
+        "status": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "estimatedCost": { "type": "number" }
+      },
+      "required": ["id", "shopId", "filename", "fileUrl", "otp", "status", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/shops/{shopId}": {
+      "schema": "Shop",
+      "description": "Shop details"
+    },
+    "/jobs/{jobId}": {
+      "schema": "PrintJob",
+      "description": "Print jobs queue"
+    }
+  }
+}

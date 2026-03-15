@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+    }
+
+    // Test connection
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Shops
+    match /shops/{shopId} {
+      allow read: if true; // Students need to see shop name
+      allow write: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+    }
+
+    // Print Jobs
+    match /jobs/{jobId} {
+      allow create: if true; // Anyone can submit a job
+      allow read, update, delete: if (
+        // Allow access to the demo shop jobs for everyone (for testing)
+        resource.data.shopId == 'demo-shop' || 
+        (request.resource != null && request.resource.data.shopId == 'demo-shop')
+      ) || (
+        // Standard authenticated owner access
+        isAuthenticated() && 
+        get(/databases/$(database)/documents/shops/$(resource.data.shopId)).data.ownerId == request.auth.uid
+      );
+    }
+  }
+}

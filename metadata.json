@@ -1,0 +1,7 @@
+{
+  "name": "XeroxStream - Smart Print System",
+  "description": "A privacy-first, cloud-to-print solution for xerox shops. Allows students to upload documents securely via QR code, set print parameters, and authorize printing via OTP without local storage on the shop owner's device.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
