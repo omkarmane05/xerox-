@@ -24,7 +24,8 @@ export enum JobStatus {
 
 export interface PrintJob {
   id: string;
-  shopId: string; // Target shop for this job
+  shopId: string; 
+  ownerId: string; // Added for security rules optimization
   filename: string;
   fileUrl: string; // Blob URL (In-memory)
   fileType: string;
@@ -35,6 +36,7 @@ export interface PrintJob {
   orientation: Orientation;
   otp: string;
   status: JobStatus;
+  processingStatus?: 'scanning' | 'ocr' | 'ready' | 'failed';
   timestamp: number;
   estimatedCost: number;
 }

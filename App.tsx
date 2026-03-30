@@ -52,7 +52,7 @@ const StudentRoute: React.FC = () => {
     <div className="min-h-screen flex flex-col bg-slate-50">
       <Header view="student" shopName={shop?.name} />
       <main className="flex-grow container mx-auto px-4 py-6 md:py-10">
-        <StudentPortal onJobCreated={addJob} shopId={shopId} />
+        <StudentPortal onJobCreated={addJob} shopId={shopId} ownerId={shop?.ownerId || ''} />
       </main>
     </div>
   );

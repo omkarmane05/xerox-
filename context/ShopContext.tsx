@@ -13,6 +13,7 @@ import {
   getDocFromServer
 } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { logger } from '../services/loggerService';
 
 enum OperationType {
   CREATE = 'create',
@@ -47,10 +48,11 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     operationType,
     path
   }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  return JSON.stringify(errInfo);
+  const errStr = JSON.stringify(errInfo);
+  console.error('Firestore Error: ', errStr);
+  throw new Error(errStr);
 }
-import { PrintJob, Shop, JobStatus } from '../types';
+import { PrintJob, Shop, JobStatus, PrintColor, PagesPerSheet, Orientation } from '../types';
 import { useAuth } from './AuthContext';
 
 interface ShopContextType {
@@ -69,66 +71,168 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Listen for jobs in real-time
   useEffect(() => {
-    if (!user?.shopId) {
-      // If student view, we might not have a user, but we have shopId from URL
-      // However, the dashboard needs filtering by user.shopId
+    let q;
+    
+    if (user?.id === 'mock-guest-id') {
+      // For mock mode, listen to the public demo-shop jobs
+      q = query(
+        collection(db, 'jobs'), 
+        where('shopId', '==', 'demo-shop')
+      );
+    } else if (user?.shopId && auth.currentUser) {
+      // For real mode, listen to the owner's jobs
+      q = query(
+        collection(db, 'jobs'), 
+        where('ownerId', '==', auth.currentUser.uid)
+      );
+    } else {
+      setJobs([]);
       return;
     }
-
-    const q = query(
-      collection(db, 'jobs'), 
-      where('shopId', '==', user.shopId)
-    );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const jobsList = snapshot.docs.map(doc => doc.data() as PrintJob);
       // Sort in memory to avoid index requirement
       jobsList.sort((a, b) => b.timestamp - a.timestamp);
-      setJobs(jobsList);
+      
+      // If in mock mode and no real jobs exist yet, add some sample data
+      if (user?.id === 'mock-guest-id' && jobsList.length === 0) {
+        const mockJobs: PrintJob[] = [
+          {
+            id: 'mock-1',
+            shopId: 'demo-shop',
+            ownerId: 'mock-guest-id',
+            filename: 'assignment_final.pdf',
+            fileUrl: 'https://example.com/file1.pdf',
+            fileType: 'application/pdf',
+            otp: '1234',
+            status: JobStatus.PENDING,
+            timestamp: Date.now() - 1000 * 60 * 5,
+            color: PrintColor.COLOR,
+            pagesPerSheet: PagesPerSheet.ONE,
+            orientation: Orientation.PORTRAIT,
+            numCopies: 2,
+            pageRange: 'All',
+            estimatedCost: 20
+          }
+        ];
+        setJobs(mockJobs);
+      } else {
+        setJobs(jobsList);
+      }
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'jobs');
+      // Don't throw for mock mode, just log
+      if (user?.id === 'mock-guest-id') {
+        console.warn("Mock mode Firestore listen failed (expected if rules not deployed):", error);
+      } else {
+        handleFirestoreError(error, OperationType.LIST, 'jobs');
+      }
     });
 
     return () => unsubscribe();
-  }, [user?.shopId]);
+  }, [user?.id, user?.shopId]);
 
-  // Special listener for students (they need to see their own job if they refresh, 
-  // but for now let's just focus on the owner's queue)
-  
+  // Simulated Event-Driven Microservice (Processing)
+  // In a real FAANG app, this would be a Firebase Cloud Function triggered by Firestore onCreate.
+  useEffect(() => {
+    const unprocessedJobs = jobs.filter(j => !j.processingStatus || j.processingStatus !== 'ready');
+    
+    unprocessedJobs.forEach(async (job) => {
+      if (!job.processingStatus) {
+        logger.info("Starting document processing (Event-Driven Simulation)", { jobId: job.id });
+        await updateJobProcessing(job.id, 'scanning');
+        
+        setTimeout(async () => {
+          await updateJobProcessing(job.id, 'ocr');
+          
+          setTimeout(async () => {
+            await updateJobProcessing(job.id, 'ready');
+            logger.info("Document processing complete", { jobId: job.id });
+          }, 2000);
+        }, 2000);
+      }
+    });
+  }, [jobs]);
+
+  const updateJobProcessing = async (id: string, processingStatus: 'scanning' | 'ocr' | 'ready' | 'failed') => {
+    try {
+      await updateDoc(doc(db, 'jobs', id), { processingStatus });
+    } catch (err) {
+      // Fallback for mock mode
+      setJobs(prev => prev.map(j => j.id === id ? { ...j, processingStatus } : j));
+    }
+  };
+
   const addJob = async (job: PrintJob) => {
-    await setDoc(doc(db, 'jobs', job.id), job);
+    logger.info("Adding new print job", { filename: job.filename, shopId: job.shopId });
+    try {
+      await setDoc(doc(db, 'jobs', job.id), {
+        ...job,
+        processingStatus: 'scanning' // Initial state
+      });
+    } catch (error) {
+      if (user?.id === 'mock-guest-id') {
+        // Local fallback if write fails in mock mode
+        setJobs(prev => [{ ...job, processingStatus: 'scanning' }, ...prev]);
+      } else {
+        handleFirestoreError(error, OperationType.WRITE, `jobs/${job.id}`);
+      }
+    }
   };
 
   const updateJobStatus = async (id: string, status: JobStatus) => {
-    await updateDoc(doc(db, 'jobs', id), { status });
+    logger.info("Updating job status", { jobId: id, newStatus: status });
+    try {
+      await updateDoc(doc(db, 'jobs', id), { status });
 
-    if (status === JobStatus.COMPLETED) {
-      setTimeout(async () => {
-        try {
-          await deleteDoc(doc(db, 'jobs', id));
-        } catch (err) {
-          console.error("Error deleting completed job:", err);
-        }
-      }, 10000); 
+      if (status === JobStatus.COMPLETED) {
+        setTimeout(async () => {
+          try {
+            await deleteDoc(doc(db, 'jobs', id));
+          } catch (err) {
+            console.error("Error deleting completed job:", err);
+          }
+        }, 10000); 
+      }
+    } catch (error) {
+      if (user?.id === 'mock-guest-id') {
+        setJobs(prev => prev.map(j => j.id === id ? { ...j, status } : j));
+      } else {
+        handleFirestoreError(error, OperationType.UPDATE, `jobs/${id}`);
+      }
     }
   };
 
   const removeJob = async (id: string) => {
-    await deleteDoc(doc(db, 'jobs', id));
+    logger.info("Removing job", { jobId: id });
+    try {
+      await deleteDoc(doc(db, 'jobs', id));
+    } catch (error) {
+      if (user?.id === 'mock-guest-id') {
+        setJobs(prev => prev.filter(j => j.id !== id));
+      } else {
+        handleFirestoreError(error, OperationType.DELETE, `jobs/${id}`);
+      }
+    }
   };
 
   const getShopById = async (id: string): Promise<Shop | null> => {
-    if (id === 'demo-shop') {
+    if (user?.id === 'mock-guest-id' && id === 'demo-shop') {
       return {
         id: 'demo-shop',
-        name: 'Demo Xerox Shop',
-        ownerId: 'guest-owner-id',
+        name: 'Demo Xerox Shop (Mock)',
+        ownerId: 'mock-guest-id',
         address: 'Demo Street',
         qrCodeUrl: ''
       };
     }
-    const shopDoc = await getDoc(doc(db, 'shops', id));
-    return shopDoc.exists() ? (shopDoc.data() as Shop) : null;
+    try {
+      const shopDoc = await getDoc(doc(db, 'shops', id));
+      return shopDoc.exists() ? (shopDoc.data() as Shop) : null;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `shops/${id}`);
+      return null;
+    }
   };
 
   return (

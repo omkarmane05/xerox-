@@ -12,33 +12,39 @@ service cloud.firestore {
 
     // User profiles
     match /users/{userId} {
-      allow read: if isAuthenticated();
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
       allow write: if isOwner(userId);
     }
 
-    // Test connection
-    match /test/connection {
-      allow read: if true;
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         request.auth.token.email == "omkarmane512@gmail.com");
     }
 
     // Shops
     match /shops/{shopId} {
-      allow read: if true; // Students need to see shop name
-      allow write: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+      allow read: if true; // Students need to see shop name/details
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
     }
 
     // Print Jobs
     match /jobs/{jobId} {
-      allow create: if true; // Anyone can submit a job
-      allow read, update, delete: if (
-        // Allow access to the demo shop jobs for everyone (for testing)
-        resource.data.shopId == 'demo-shop' || 
-        (request.resource != null && request.resource.data.shopId == 'demo-shop')
-      ) || (
-        // Standard authenticated owner access
-        isAuthenticated() && 
-        get(/databases/$(database)/documents/shops/$(resource.data.shopId)).data.ownerId == request.auth.uid
-      );
+      // Anyone can submit a job to a shop
+      allow create: if request.resource.data.keys().hasAll(['shopId', 'ownerId', 'filename', 'fileUrl', 'otp', 'status', 'timestamp']) &&
+                      request.resource.data.status == 'Pending' &&
+                      request.resource.data.fileUrl.size() < 1500000; // ~1MB limit
+
+      // Only the shop owner can read/update/delete jobs for their shop
+      // Fallback: allow anyone to manage demo-shop jobs for testing purposes
+      allow read, update, delete: if (isAuthenticated() && resource.data.ownerId == request.auth.uid) ||
+                                     (resource.data.shopId == 'demo-shop');
+    }
+    
+    // Test connection
+    match /test/connection {
+      allow read: if true;
     }
   }
 }

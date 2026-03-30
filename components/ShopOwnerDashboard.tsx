@@ -19,6 +19,18 @@ const ShopOwnerDashboard: React.FC<ShopOwnerDashboardProps> = ({ jobs, onUpdateS
   const [aiInsight, setAiInsight] = useState<string>("");
   const [copied, setCopied] = useState(false);
   const { user } = useAuth();
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     if (jobs.length > 0) {
@@ -66,10 +78,21 @@ const ShopOwnerDashboard: React.FC<ShopOwnerDashboardProps> = ({ jobs, onUpdateS
       )}
 
       {/* Summary Section */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <StatCard icon={<Clock className="text-amber-600" />} label="Waiting" value={jobs.filter(j => j.status === JobStatus.PENDING).length} color="bg-amber-100" />
         <StatCard icon={<ShieldCheck className="text-indigo-600" />} label="Verified" value={jobs.filter(j => j.status === JobStatus.VERIFIED).length} color="bg-indigo-100" />
         <StatCard icon={<Printer className="text-blue-600" />} label="Printing" value={jobs.filter(j => j.status === JobStatus.PRINTING).length} color="bg-blue-100" />
+        
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3">
+          <div className={`${isOnline ? 'bg-green-100' : 'bg-red-100'} p-2.5 rounded-xl transition-colors`}>
+            <div className={`w-5 h-5 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+          </div>
+          <div>
+            <div className="text-xl font-black text-slate-900 leading-none">{isOnline ? 'Active' : 'Offline'}</div>
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mt-1">Status</div>
+          </div>
+        </div>
+
         <button 
           onClick={() => setShowQr(true)}
           className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-1 hover:border-indigo-500 transition-all group"

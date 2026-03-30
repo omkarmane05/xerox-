@@ -1,7 +1,8 @@
 
 import React, { useState } from 'react';
 import { PrintJob, JobStatus } from '../types';
-import { FileText, MoreVertical, Check, X, Printer, Trash2 } from 'lucide-react';
+import { FileText, MoreVertical, Check, X, Printer, Trash2, ShieldAlert, Lock } from 'lucide-react';
+import { decryptFile } from '../services/cryptoService';
 
 interface JobCardProps {
   job: PrintJob;
@@ -12,6 +13,8 @@ interface JobCardProps {
 const JobCard: React.FC<JobCardProps> = ({ job, onUpdateStatus, onRemoveJob }) => {
   const [otpInput, setOtpInput] = useState('');
   const [error, setError] = useState(false);
+
+  const [isDecrypting, setIsDecrypting] = useState(false);
 
   const handleVerify = async () => {
     if (otpInput === job.otp) {
@@ -24,34 +27,52 @@ const JobCard: React.FC<JobCardProps> = ({ job, onUpdateStatus, onRemoveJob }) =
   };
 
   const handlePrint = async () => {
-    await onUpdateStatus(job.id, JobStatus.PRINTING);
-    
-    // Create a hidden iframe for printing
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-    
-    iframe.onload = () => {
-      if (iframe.contentWindow) {
-        iframe.contentWindow.print();
-        
-        // Cleanup after a delay to allow print dialog to open
-        setTimeout(() => {
-          document.body.removeChild(iframe);
-          onUpdateStatus(job.id, JobStatus.COMPLETED);
-        }, 5000);
-      }
-    };
+    setIsDecrypting(true);
+    try {
+      await onUpdateStatus(job.id, JobStatus.PRINTING);
+      
+      // 1. Fetch the encrypted blob from the URL
+      const response = await fetch(job.fileUrl);
+      const encryptedBlob = await response.blob();
 
-    // For PDFs, we can set the src directly. For images, we might need a wrapper.
-    if (job.fileType.includes('pdf')) {
-      iframe.src = job.fileUrl;
-    } else {
-      // For images, wrap in HTML
-      const html = `<html><body style="margin:0;display:flex;justify-content:center;align-items:center;"><img src="${job.fileUrl}" style="max-width:100%;max-height:100%;object-fit:contain;"></body></html>`;
-      iframe.contentWindow?.document.open();
-      iframe.contentWindow?.document.write(html);
-      iframe.contentWindow?.document.close();
+      // 2. Decrypt locally using the verified OTP
+      const decryptedBlob = await decryptFile(encryptedBlob, job.otp, job.id, job.fileType);
+      const decryptedUrl = URL.createObjectURL(decryptedBlob);
+
+      // 3. Create a hidden iframe for printing
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+      
+      iframe.onload = () => {
+        if (iframe.contentWindow) {
+          iframe.contentWindow.print();
+          
+          // Cleanup after a delay to allow print dialog to open
+          setTimeout(() => {
+            document.body.removeChild(iframe);
+            URL.revokeObjectURL(decryptedUrl);
+            onUpdateStatus(job.id, JobStatus.COMPLETED);
+          }, 5000);
+        }
+      };
+
+      // For PDFs, we can set the src directly. For images, we might need a wrapper.
+      if (job.fileType.includes('pdf')) {
+        iframe.src = decryptedUrl;
+      } else {
+        // For images, wrap in HTML
+        const html = `<html><body style="margin:0;display:flex;justify-content:center;align-items:center;"><img src="${decryptedUrl}" style="max-width:100%;max-height:100%;object-fit:contain;"></body></html>`;
+        iframe.contentWindow?.document.open();
+        iframe.contentWindow?.document.write(html);
+        iframe.contentWindow?.document.close();
+      }
+    } catch (err) {
+      console.error("Decryption/Print Error:", err);
+      alert("Failed to decrypt document. The OTP might be invalid or the file is corrupted.");
+      await onUpdateStatus(job.id, JobStatus.VERIFIED);
+    } finally {
+      setIsDecrypting(false);
     }
   };
 
@@ -77,6 +98,12 @@ const JobCard: React.FC<JobCardProps> = ({ job, onUpdateStatus, onRemoveJob }) =
           <h3 className="font-bold text-slate-900 truncate">{job.filename}</h3>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-xs font-medium text-slate-500">
             <span className={`px-2 py-0.5 rounded-full ${getStatusColor(job.status)}`}>{job.status}</span>
+            {job.processingStatus && job.processingStatus !== 'ready' && (
+              <span className="flex items-center gap-1 text-blue-500 animate-pulse">
+                <RefreshCcw className="w-3 h-3 animate-spin" />
+                {job.processingStatus.toUpperCase()}...
+              </span>
+            )}
             <span>{job.color}</span>
             <span>{job.numCopies} Copies</span>
             <span>{new Date(job.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
@@ -109,10 +136,20 @@ const JobCard: React.FC<JobCardProps> = ({ job, onUpdateStatus, onRemoveJob }) =
         ) : job.status === JobStatus.VERIFIED ? (
           <button 
             onClick={handlePrint}
-            className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-2 bg-green-600 text-white rounded-lg font-bold hover:bg-green-700 transition-colors shadow-lg shadow-green-100"
+            disabled={isDecrypting}
+            className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-2 bg-green-600 text-white rounded-lg font-bold hover:bg-green-700 transition-colors shadow-lg shadow-green-100 disabled:opacity-50"
           >
-            <Printer className="w-4 h-4" />
-            Print Now
+            {isDecrypting ? (
+              <>
+                <RefreshCcw className="w-4 h-4 animate-spin" />
+                Decrypting...
+              </>
+            ) : (
+              <>
+                <Printer className="w-4 h-4" />
+                Print Now
+              </>
+            )}
           </button>
         ) : job.status === JobStatus.PRINTING ? (
           <div className="flex items-center gap-2 text-blue-600 font-bold px-4 py-2">

@@ -1,10 +1,12 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { PrintJob, PrintColor, PagesPerSheet, Orientation, JobStatus } from '../types';
-import { Upload, FileText, Settings, CheckCircle2, ChevronRight, ArrowLeft } from 'lucide-react';
+import { Upload, FileText, Settings, CheckCircle2, ChevronRight, ArrowLeft, Zap, ShieldAlert } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
-import { auth, db } from '../firebase';
+import { auth, db, storage } from '../firebase';
 import { doc, setDoc } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { encryptFile } from '../services/cryptoService';
 
 enum OperationType {
   CREATE = 'create',
@@ -39,16 +41,18 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     operationType,
     path
   }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  return JSON.stringify(errInfo);
+  const errStr = JSON.stringify(errInfo);
+  console.error('Firestore Error: ', errStr);
+  throw new Error(errStr);
 }
 
 interface StudentPortalProps {
   onJobCreated: (job: PrintJob) => Promise<void>;
   shopId: string;
+  ownerId: string;
 }
 
-const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) => {
+const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId, ownerId }) => {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [file, setFile] = useState<File | null>(null);
   const [settings, setSettings] = useState({
@@ -63,7 +67,9 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) =
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<string>("");
   const [analysisNote, setAnalysisNote] = useState("");
+  const [analysisWarning, setAnalysisWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [currentJobId, setCurrentJobId] = useState<string>(`job-${Math.random().toString(36).substr(2, 9)}`);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -76,15 +82,86 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) =
     }
   };
 
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (items) {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].type.indexOf("image") !== -1) {
+            const blob = items[i].getAsFile();
+            if (blob) {
+              const pastedFile = new File([blob], `pasted-image-${Date.now()}.jpg`, { type: blob.type });
+              setFile(pastedFile);
+              analyzeWithGemini(pastedFile);
+              setStep(2);
+              setError(null);
+              addLog("Image pasted from clipboard");
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, []);
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const droppedFile = e.dataTransfer.files[0];
+      setFile(droppedFile);
+      analyzeWithGemini(droppedFile);
+      setStep(2);
+      setError(null);
+      addLog("File dropped");
+    }
+  };
+
   const analyzeWithGemini = async (selectedFile: File) => {
     setIsAnalyzing(true);
+    setAnalysisWarning(null);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      
+      let prompt = `I'm a student printing a file: "${selectedFile.name}". Give me 1 quick tip for the best print result.`;
+      const parts: any[] = [{ text: prompt }];
+
+      // If it's an image, send it to Gemini for visual analysis
+      if (selectedFile.type.startsWith('image/')) {
+        const base64Data = await readFileAsDataURL(selectedFile);
+        const base64Content = base64Data.split(',')[1];
+        parts.push({
+          inlineData: {
+            data: base64Content,
+            mimeType: selectedFile.type
+          }
+        });
+        prompt = `Analyze this document image for printing. 
+        1. Is it blurry or low quality?
+        2. Is it a sensitive document (ID card, Passport)?
+        3. Any cropping suggestions?
+        Keep the response under 20 words.`;
+        parts[0].text = prompt;
+      }
+
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `I'm a student printing a file: "${selectedFile.name}". Give me 1 quick tip for the best print result.`
+        contents: { parts }
       });
-      setAnalysisNote(response.text || "Optimize your margins.");
+      
+      const text = response.text || "";
+      setAnalysisNote(text);
+      
+      if (text.toLowerCase().includes('blurry') || text.toLowerCase().includes('low quality')) {
+        setAnalysisWarning("AI detected low quality. Result might be blurry.");
+      }
     } catch (err) {
       console.error("Gemini Analysis Error:", err);
     } finally {
@@ -176,15 +253,34 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) =
       }
       
       setSubmitStatus("Connecting to database...");
-      addLog("Saving to Firestore...");
+      addLog("Encrypting file (E2EE)...");
       const otp = Math.floor(1000 + Math.random() * 9000).toString();
-      const jobId = Math.random().toString(36).substr(2, 9);
+      const jobId = currentJobId; // Use the stable ID for idempotency
+
+      // 1. Encrypt the file locally
+      const encryptedBlob = await encryptFile(file, otp, jobId);
+      addLog(`Encryption complete. Size: ${Math.round(encryptedBlob.size / 1024)}KB`);
+
+      // 2. Upload to Firebase Storage
+      setSubmitStatus("Uploading to secure vault...");
+      const storageRef = ref(storage, `jobs/${jobId}`);
+      const uploadResult = await uploadBytes(storageRef, encryptedBlob, {
+        contentType: 'application/octet-stream',
+        customMetadata: {
+          originalMimeType: file.type,
+          isEncrypted: 'true'
+        }
+      });
+      
+      const fileUrl = await getDownloadURL(uploadResult.ref);
+      addLog("Storage upload successful!");
 
       const newJob: PrintJob = {
         id: jobId,
         shopId,
+        ownerId,
         filename: file.name,
-        fileUrl: fileData, 
+        fileUrl: fileUrl, // Now a real URL, not Base64
         fileType: file.type,
         numCopies: settings.copies,
         color: settings.color,
@@ -197,10 +293,14 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) =
         estimatedCost: (settings.copies * (settings.color === PrintColor.COLOR ? 10 : 2))
       };
 
-      await Promise.race([
-        setDoc(doc(db, 'jobs', newJob.id), newJob),
-        timeoutPromise
-      ]);
+      try {
+        await Promise.race([
+          setDoc(doc(db, 'jobs', newJob.id), newJob),
+          timeoutPromise
+        ]);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, `jobs/${newJob.id}`);
+      }
       
       addLog("Upload successful!");
       setCreatedJob(newJob);
@@ -247,22 +347,41 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) =
 
       {/* Step 1: Upload */}
       {step === 1 && (
-        <div className="flex-grow flex flex-col justify-center animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div 
+          className="flex-grow flex flex-col justify-center animate-in fade-in slide-in-from-bottom-4 duration-500"
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-black text-slate-900 tracking-tight">Print Securely.</h1>
-            <p className="text-slate-500 mt-2 text-sm">Upload your file to get an instant print code.</p>
+            <h1 className="text-4xl font-black text-slate-900 tracking-tight leading-none">
+              Drop. Paste. <span className="text-indigo-600">Print.</span>
+            </h1>
+            <p className="text-slate-500 mt-3 text-sm font-medium">Upload, drag a file, or just <span className="bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded font-bold">Ctrl+V</span> an image.</p>
           </div>
           
           <div 
             onClick={() => fileInputRef.current?.click()}
-            className="aspect-square bg-white rounded-[2.5rem] shadow-2xl shadow-indigo-100 border-2 border-dashed border-slate-100 flex flex-col items-center justify-center p-10 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-all active:scale-95"
+            className="group relative aspect-square bg-white rounded-[3rem] shadow-2xl shadow-indigo-100 border-2 border-dashed border-slate-100 flex flex-col items-center justify-center p-10 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-all active:scale-95 overflow-hidden"
           >
+            <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
             <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
-            <div className="w-24 h-24 bg-indigo-50 rounded-full flex items-center justify-center mb-6">
-              <Upload className="text-indigo-600 w-10 h-10" />
+            
+            <div className="relative">
+              <div className="w-24 h-24 bg-indigo-50 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-500">
+                <Upload className="text-indigo-600 w-10 h-10" />
+              </div>
+              <div className="absolute -top-2 -right-2 w-8 h-8 bg-white rounded-full shadow-lg flex items-center justify-center animate-bounce">
+                <Zap className="w-4 h-4 text-amber-500 fill-amber-500" />
+              </div>
             </div>
-            <p className="text-xl font-bold text-slate-800">Tap to Upload</p>
-            <p className="text-sm text-slate-400 mt-2">PDF, PNG or JPG files</p>
+            
+            <p className="text-xl font-black text-slate-800">Tap or Drop File</p>
+            <p className="text-xs text-slate-400 mt-2 font-bold uppercase tracking-widest">Supports PDF, PNG, JPG</p>
+            
+            <div className="mt-8 flex items-center gap-2 px-4 py-2 bg-slate-50 rounded-full border border-slate-100">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+              <span className="text-[10px] font-black text-slate-500 uppercase tracking-tighter">System Ready</span>
+            </div>
           </div>
         </div>
       )}
@@ -323,6 +442,13 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ onJobCreated, shopId }) =
                   ))}
                 </div>
              </div>
+
+             {analysisWarning && (
+               <div className="bg-amber-50 p-4 rounded-2xl border border-amber-100 flex gap-3 animate-pulse">
+                 <ShieldAlert className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                 <p className="text-xs text-amber-700 font-bold">{analysisWarning}</p>
+               </div>
+             )}
 
              {analysisNote && (
                <div className="bg-indigo-50/50 p-4 rounded-2xl border border-indigo-100 flex gap-3">
